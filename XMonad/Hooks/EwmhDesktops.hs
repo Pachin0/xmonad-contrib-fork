@@ -53,6 +53,7 @@ module XMonad.Hooks.EwmhDesktops (
 import Codec.Binary.UTF8.String (encode)
 import Data.Bits
 import qualified Data.Map.Strict as M
+import Graphics.X11.Xlib.Types
 
 import XMonad
 import XMonad.Prelude
@@ -85,9 +86,9 @@ import qualified XMonad.Util.ExtensibleState as XS
 -- | Add EWMH support for workspaces (virtual desktops) to the given
 -- 'XConfig'.  See above for an example.
 ewmh :: XConfig a -> XConfig a
-ewmh c = c { startupHook     = ewmhDesktopsStartup <> startupHook c
-           , handleEventHook = ewmhDesktopsEventHook <> handleEventHook c
-           , logHook         = ewmhDesktopsLogHook <> logHook c }
+ewmh c = c { startupHook     = ewmhDesktopsStartup <+> startupHook c
+           , handleEventHook = ewmhDesktopsEventHook <+> handleEventHook c
+           , logHook         = ewmhDesktopsLogHook <+> logHook c }
 
 
 -- $customization
@@ -293,15 +294,28 @@ instance ExtensionClass WindowDesktops where initialValue = WindowDesktops (M.si
 newtype ActiveWindow = ActiveWindow Window deriving Eq
 instance ExtensionClass ActiveWindow where initialValue = ActiveWindow (complement none)
 
+newtype MonitorTags = MonitorTags [WorkspaceId]
+  deriving (Show,Eq)
+instance ExtensionClass MonitorTags where
+  initialValue = MonitorTags []
+
+
 -- | Compare the given value against the value in the extensible state. Run the
 -- action if it has changed.
 whenChanged :: (Eq a, ExtensionClass a) => a -> X () -> X ()
 whenChanged = whenX . XS.modified . const
 
+
+
 ewmhDesktopsLogHook' :: EwmhDesktopsConfig -> X ()
 ewmhDesktopsLogHook' EwmhDesktopsConfig{workspaceSort, workspaceRename} = withWindowSet $ \s -> do
     sort' <- workspaceSort
     let ws = sort' $ W.workspaces s
+
+    let mkViewPortSort cmpX = do
+          cmp <- cmpX 
+          return $ sortBy (\a b -> cmp (fst a) (fst b))
+    viewPortSort <- mkViewPortSort getWsCompare
 
     -- Set number of workspaces and names thereof
     rename <- workspaceRename
@@ -336,6 +350,29 @@ ewmhDesktopsLogHook' EwmhDesktopsConfig{workspaceSort, workspaceRename} = withWi
     -- Set active window
     let activeWindow' = fromMaybe none (W.peek s)
     whenChanged (ActiveWindow activeWindow') $ setActiveWindow activeWindow'
+
+    let currentTags = map (W.tag . W.workspace) visibleScreens
+        visibleScreens = W.current s : W.visible s
+    whenChanged (MonitorTags currentTags) (mkViewPorts s viewPortSort)
+      
+
+mkViewPorts :: WindowSet -> ([(WorkspaceId,(Position,Position))] -> [(WorkspaceId, (Position,Position))] )-> X ()
+mkViewPorts s sort' = do
+  let vWs = W.current s : W.visible s
+      hWs = W.hidden s
+      viewPorts = map mkViewPort' vWs ++ map (`mkViewPort` W.current s) hWs
+  setDesktopViewport $ pruneTags $ sort' viewPorts
+  where
+    mkViewPort w scr = (W.tag w, mkPos scr) 
+    mkViewPort' x = mkViewPort (W.workspace x) x
+    rectangle' x = screenRect $ W.screenDetail x
+    mkPos x = (rect_x $ rectangle' x, rect_y $ rectangle' x)
+    pruneTags list = concatMap ((\(a,b) -> a : [b]) . snd ) list
+
+
+
+
+
 
 ewmhDesktopsEventHook' :: Event -> EwmhDesktopsConfig -> X All
 ewmhDesktopsEventHook'
@@ -376,8 +413,8 @@ ewmhDesktopsEventHook' _ _ = mempty
 
 -- | Add EWMH fullscreen functionality to the given config.
 ewmhFullscreen :: XConfig a -> XConfig a
-ewmhFullscreen c = c { startupHook     = startupHook c <> fullscreenStartup
-                     , handleEventHook = handleEventHook c <> fullscreenEventHook }
+ewmhFullscreen c = c { startupHook     = startupHook c <+> fullscreenStartup
+                     , handleEventHook = handleEventHook c <+> fullscreenEventHook }
 
 -- | Advertises EWMH fullscreen support to the X server.
 {-# DEPRECATED fullscreenStartup "Use ewmhFullscreen instead." #-}
@@ -460,6 +497,13 @@ setActiveWindow w = withDisplay $ \dpy -> do
     r <- asks theRoot
     a <- getAtom "_NET_ACTIVE_WINDOW"
     io $ changeProperty32 dpy r a wINDOW propModeReplace [fromIntegral w]
+
+setDesktopViewport :: [Position] -> X ()
+setDesktopViewport l = withDisplay $ \dpy -> do
+  a <- io $ internAtom dpy "_NET_DESKTOP_VIEWPORT" True
+  r <- asks theRoot
+  let n = map fromIntegral l
+  io $ changeProperty32 dpy r a cARDINAL propModeReplace n
 
 setSupported :: X ()
 setSupported = withDisplay $ \dpy -> do
