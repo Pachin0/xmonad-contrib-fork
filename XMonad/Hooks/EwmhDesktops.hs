@@ -86,9 +86,9 @@ import qualified XMonad.Util.ExtensibleState as XS
 -- | Add EWMH support for workspaces (virtual desktops) to the given
 -- 'XConfig'.  See above for an example.
 ewmh :: XConfig a -> XConfig a
-ewmh c = c { startupHook     = ewmhDesktopsStartup <+> startupHook c
-           , handleEventHook = ewmhDesktopsEventHook <+> handleEventHook c
-           , logHook         = ewmhDesktopsLogHook <+> logHook c }
+ewmh c = c { startupHook     = ewmhDesktopsStartup <> startupHook c
+           , handleEventHook = ewmhDesktopsEventHook <> handleEventHook c
+           , logHook         = ewmhDesktopsLogHook <> logHook c }
 
 
 -- $customization
@@ -294,18 +294,16 @@ instance ExtensionClass WindowDesktops where initialValue = WindowDesktops (M.si
 newtype ActiveWindow = ActiveWindow Window deriving Eq
 instance ExtensionClass ActiveWindow where initialValue = ActiveWindow (complement none)
 
+-- | @_NET_DESKTOP_VIEWPORT@
 newtype MonitorTags = MonitorTags [WorkspaceId]
   deriving (Show,Eq)
 instance ExtensionClass MonitorTags where
   initialValue = MonitorTags []
 
-
 -- | Compare the given value against the value in the extensible state. Run the
 -- action if it has changed.
 whenChanged :: (Eq a, ExtensionClass a) => a -> X () -> X ()
 whenChanged = whenX . XS.modified . const
-
-
 
 ewmhDesktopsLogHook' :: EwmhDesktopsConfig -> X ()
 ewmhDesktopsLogHook' EwmhDesktopsConfig{workspaceSort, workspaceRename} = withWindowSet $ \s -> do
@@ -351,11 +349,15 @@ ewmhDesktopsLogHook' EwmhDesktopsConfig{workspaceSort, workspaceRename} = withWi
     let activeWindow' = fromMaybe none (W.peek s)
     whenChanged (ActiveWindow activeWindow') $ setActiveWindow activeWindow'
 
+    -- Set desktop Viewport. Hidden workspaces are mapped to the current
+    -- screen's viewport.
     let currentTags = map (W.tag . W.workspace) visibleScreens
         visibleScreens = W.current s : W.visible s
     whenChanged (MonitorTags currentTags) (mkViewPorts s viewPortSort)
       
-
+ 
+-- | Create the viewports from the current StackSet and a sorting viewport
+-- sorting Function 
 mkViewPorts :: WindowSet -> ([(WorkspaceId,(Position,Position))] -> [(WorkspaceId, (Position,Position))] )-> X ()
 mkViewPorts s sort' = do
   let vWs = W.current s : W.visible s
@@ -368,11 +370,6 @@ mkViewPorts s sort' = do
     rectangle' x = screenRect $ W.screenDetail x
     mkPos x = (rect_x $ rectangle' x, rect_y $ rectangle' x)
     pruneTags list = concatMap ((\(a,b) -> a : [b]) . snd ) list
-
-
-
-
-
 
 ewmhDesktopsEventHook' :: Event -> EwmhDesktopsConfig -> X All
 ewmhDesktopsEventHook'
